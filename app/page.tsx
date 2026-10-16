@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import "./chat.css";
+import LoadingSteps from "./components/LoadingSteps";
 
 type Kind = "pdf" | "image" | "html" | "other";
 type Theme = "light" | "dark";
@@ -645,12 +646,8 @@ export default function Home() {
 
               {loading && (
                 <div className="row bot">
-                  <span className="spark small pulse">✻</span>
-                  <div className="typing">
-                    <i />
-                    <i />
-                    <i />
-                  </div>
+                  <span className="spark small">✻</span>
+                  <LoadingSteps />
                 </div>
               )}
               <div ref={bottomRef} />
