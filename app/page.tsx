@@ -44,7 +44,7 @@ const SUGGESTIONS = [
   "Send me TP 3 of Devops 2",
   "chapitre 1 devsecops",
   "slides big data",
-  "TP Redis 2026",
+  "TP api et architecture microservice",
 ];
 
 const LABELS: Record<string, string> = {
