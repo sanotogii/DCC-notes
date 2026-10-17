@@ -139,18 +139,21 @@ Useful scripts:
 
 ## CI/CD
 
-`.github/workflows/deploy.yml` runs on every push and pull request to `main`:
+`.github/workflows/main.yml` runs on every push to `main`:
 
 1. Installs dependencies with `npm ci`
-2. Builds the app with OpenNext (so broken builds fail on pull requests too)
-3. On pushes to `main` only, deploys to Cloudflare Workers
+2. Stores `N8N_WEBHOOK_URL` as a Cloudflare Worker secret
+3. Builds and deploys the app to Cloudflare Workers
 
-Add these two repository secrets under **Settings → Secrets and variables → Actions**:
+Add these three repository secrets under **Settings → Secrets and variables → Actions**:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
+- `N8N_WEBHOOK_URL` — your production n8n webhook URL
 
-The `N8N_WEBHOOK_URL` secret lives on the Worker itself and survives deploys.
+On each deployment from `main`, GitHub Actions updates the `N8N_WEBHOOK_URL`
+Worker secret with the value from GitHub Actions secrets before deploying. It
+is not bundled into the application or committed to the repository.
 
 ## Storage and privacy
 
