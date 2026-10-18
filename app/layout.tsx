@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 // import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Drive Bot",
+  title: "Dcc Notes",
   description: "Fetch your course files from Drive",
 };
 
