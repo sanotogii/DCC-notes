@@ -10,7 +10,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ type: "text", message: "Missing prompt." }, { status: 400 });
   }
   if (!url) {
-    return NextResponse.json({ type: "text", message: "N8N_WEBHOOK_URL is not set." }, { status: 500 });
+    return NextResponse.json({ type: "text", message: "An error happened on our side." }, { status: 500 });
   }
 
       try {
