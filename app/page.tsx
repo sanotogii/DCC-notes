@@ -683,8 +683,9 @@ export default function Home() {
               </svg>
             </button>
           </div>
-          <p className="hint">Enter to send · Shift+Enter for a new line</p>
-        </footer>
+<p className="hint">
+  Enter to send · Shift+Enter for a new line · <a href="/privacy">Privacy</a>
+</p>        </footer>
       </div>
 
       {/* ---------- preview panel ---------- */}
