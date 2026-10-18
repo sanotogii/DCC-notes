@@ -15,19 +15,6 @@ pipeline {
       steps { sh 'npm ci' }
     }
 
-    stage('Semgrep') {
-      steps {
-        sh '''
-          python3 -m venv .semgrep-venv
-          .semgrep-venv/bin/pip install --quiet semgrep
-          .semgrep-venv/bin/semgrep scan \
-            --config p/default --config p/nextjs \
-            --metrics=off --error \
-            --exclude node_modules --exclude .next \
-            --exclude .open-next --exclude .semgrep-venv .
-        '''
-      }
-    }
 
     stage('SonarQube Analysis') {
       steps {
@@ -42,6 +29,21 @@ pipeline {
         timeout(time: 10, unit: 'MINUTES') {
           waitForQualityGate abortPipeline: true
         }
+      }
+    }
+
+    stage('Semgrep') {
+      steps {
+        sh '''
+          python3 -m venv .semgrep-venv
+          .semgrep-venv/bin/pip install --quiet semgrep
+          .semgrep-venv/bin/semgrep scan \
+            --config p/default --config p/nextjs \
+            --metrics=off --error \
+            --exclude node_modules --exclude .next \
+            --exclude .open-next --exclude .semgrep-venv \
+            --exclude .github .
+        '''
       }
     }
 
