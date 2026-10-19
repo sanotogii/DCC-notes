@@ -155,7 +155,7 @@ flowchart LR
 
 1. Le développeur pousse un commit sur GitHub.
 2. GitHub envoie une requête `POST` (JSON) à `https://jenkins.khalidlab.tech/github-webhook/`.
-3. La requête traverse le **Cloudflare Tunnel** jusqu'au conteneur Jenkins : aucun port de l'instance n'a besoin d'être ouvert en entrée pour cela.
+3. La requête traverse le **Cloudflare Tunnel** jusqu'au conteneur Jenkins : le tunnel est une connexion **sortante**, donc aucun port n'a besoin d'être ouvert en entrée sur le pare-feu de l'instance pour cela (voir la remarque sur les ports publiés au [§ 5.2](#52-provisionnement-avec-ansible)).
 4. Jenkins récupère le code, installe les dépendances et lance l'analyse **SonarQube**.
 5. L'étape **Quality Gate** attend le verdict calculé par SonarQube.
 6. **Semgrep** analyse le code avec son jeu de règles.
@@ -167,12 +167,12 @@ flowchart LR
 |---|---|---|
 | Instance cloud | `notes`, Google Compute Engine, zone `us-central1-a`, x86_64 | Figure 2 |
 | Système | Debian 13 « trixie » (image `debian-13-trixie-v20261014`), noyau 6.12.113 | Figures 2 et 3 |
-| Provisionnement | Ansible 2.16.3, inventaire `inventory.ini`, `playbook.yml` | Figure 4 |
-| Conteneurs | Docker, Jenkins, SonarQube | Figures 1 et 4 |
+| Provisionnement | Ansible 2.16.3, inventaire `inventory.ini`, `playbook.yml` | Figure 4, § 5.2 |
+| Conteneurs | Docker ; Jenkins (`jenkins/jenkins:lts-jdk21`) ; SonarQube (`sonarqube:community`) | Playbook (§ 5.2) |
 | Exposition | Cloudflare Tunnel `khalidlab-tunnel`, cloudflared 2026.10.1 | Figures 5 et 6 |
-| SonarQube | Édition Community, projet `learn-actions` | Figures 9 et 10 |
-| Application | Next.js en TypeScript (≈ 1,6 k lignes de code TypeScript, CSS…) | Figure 9 |
-| Déploiement | Cloudflare Workers via wrangler 4.151.1, Worker `drive-bot` | Figure 8 |
+| SonarQube | Édition Community, projet `learn-actions` | Figures 8 et 9 |
+| Application | Next.js en TypeScript (≈ 1,6 k lignes de code TypeScript, CSS…) | Figure 8 |
+| Déploiement | Cloudflare Workers via wrangler 4.151.1, Worker `drive-bot` | Figure 10 |
 
 ---
 
@@ -184,10 +184,10 @@ flowchart LR
 |---|---|---|
 | Compte Google Cloud | Instance qui héberge Jenkins et SonarQube | — |
 | Ansible (poste de contrôle) | Installation de Docker et lancement des conteneurs | 2.16.3 |
-| Accès SSH à l'instance | Exécution d'Ansible et administration | — |
-| Docker | Exécution de Jenkins et SonarQube | non visible |
-| Jenkins | Orchestration du pipeline | non visible |
-| SonarQube | Analyse et Quality Gate | Community Edition |
+| Accès SSH à l'instance | Exécution d'Ansible et administration | clé `ed25519`, utilisateur `sano` |
+| Docker | Exécution de Jenkins et SonarQube | installé par le playbook (`docker-ce`, dépôt officiel Docker) |
+| Jenkins | Orchestration du pipeline | image `jenkins/jenkins:lts-jdk21` |
+| SonarQube | Analyse et Quality Gate | image `sonarqube:community` |
 | Semgrep | Analyse par règles | non visible |
 | Node.js | Build de l'application (outil Jenkins `node22`) | outil `node22` |
 | Dépôt GitHub | Code source et webhook | — |
@@ -214,7 +214,7 @@ Sur l'instance, une fois provisionnée, les commandes usuelles suivantes permett
 
 ```bash
 docker --version
-docker ps            # Jenkins et SonarQube doivent apparaître
+docker ps            # les conteneurs jenkins et sonarqube doivent apparaître
 cloudflared --version
 ```
 
@@ -240,8 +240,146 @@ cloudflared --version
 
 Le projet Ansible contient deux fichiers : `inventory.ini` (les hôtes cibles) et `playbook.yml` (les tâches).
 
+#### Inventaire : `inventory.ini`
+
+```ini
+[gcp]
+<IP_PUBLIQUE_DE_L_INSTANCE> ansible_user=sano ansible_ssh_private_key_file=~/.ssh/id_ed25519 ansible_python_interpreter=/usr/bin/python3
+```
+
+- `[gcp]` est le groupe d'hôtes ciblé par le playbook (`hosts: gcp`) ;
+- la connexion se fait en SSH avec l'utilisateur `sano` et une clé `ed25519` ;
+- `ansible_python_interpreter` force l'usage de `python3`, présent par défaut sur Debian ;
+- l'adresse IP publique est volontairement remplacée par un espace réservé dans ce document.
+
+#### Playbook : `playbook.yml`
+
+```yaml
+---
+- name: Install Docker, then run Jenkins and SonarQube as containers
+  hosts: gcp
+  become: true
+
+  tasks:
+    # ---------- Docker (installed on the VM) ----------
+    - name: Install prerequisites
+      apt:
+        name: [ca-certificates, curl, gnupg]
+        update_cache: true
+
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker GPG key
+      get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+        force: true
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable"
+        filename: docker
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+          - python3-pip
+        update_cache: true
+
+    - name: Enable and start Docker
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Install Docker Python SDK (for Ansible docker modules)
+      pip:
+        name: "docker>=7.1.0"
+        extra_args: --break-system-packages
+
+    - name: Add SSH user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    # ---------- Jenkins (container) ----------
+    - name: Run Jenkins container
+      community.docker.docker_container:
+        name: jenkins
+        image: jenkins/jenkins:lts-jdk21
+        state: started
+        restart_policy: unless-stopped
+        user: root
+        ports:
+          - "8080:8080"
+          - "50000:50000"
+        volumes:
+          - jenkins_home:/var/jenkins_home
+          - /var/run/docker.sock:/var/run/docker.sock
+
+    - name: Install Docker CLI inside the Jenkins container
+      command: docker exec -u root jenkins sh -c "command -v docker || (apt-get update && (apt-get install -y docker-cli || apt-get install -y docker.io))"
+      register: jenkins_docker_cli
+      changed_when: "'Setting up' in jenkins_docker_cli.stdout"
+
+    # ---------- SonarQube (container) ----------
+    - name: Set vm.max_map_count for SonarQube
+      sysctl:
+        name: vm.max_map_count
+        value: "262144"
+        sysctl_set: true
+        state: present
+
+    - name: Set fs.file-max for SonarQube
+      sysctl:
+        name: fs.file-max
+        value: "65536"
+        sysctl_set: true
+        state: present
+
+    - name: Run SonarQube container
+      community.docker.docker_container:
+        name: sonarqube
+        image: sonarqube:community
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "9000:9000"
+        volumes:
+          - sonarqube_data:/opt/sonarqube/data
+          - sonarqube_logs:/opt/sonarqube/logs
+          - sonarqube_extensions:/opt/sonarqube/extensions
+```
+
+#### Ce que fait le playbook
+
+| Bloc | Tâches | Rôle |
+|---|---|---|
+| **Docker (sur la VM)** | Prérequis, répertoire `/etc/apt/keyrings`, clé GPG et dépôt officiels Docker, installation de `docker-ce`, `docker-ce-cli`, `containerd.io`, des plugins `buildx` et `compose`, activation du service | Installer Docker depuis le dépôt officiel et le démarrer au boot |
+| **SDK Python Docker** | `pip install "docker>=7.1.0"` (avec `--break-system-packages`) | Requis par les modules `community.docker` ; l'option est nécessaire sur Debian 13, dont le Python système est protégé (PEP 668) |
+| **Groupe `docker`** | Ajout de l'utilisateur SSH au groupe `docker` | Permettre d'utiliser `docker` sans `sudo` (effectif à la prochaine connexion) |
+| **Jenkins** | Conteneur `jenkins/jenkins:lts-jdk21`, ports `8080` (interface web) et `50000` (agents), volume `jenkins_home`, socket Docker monté | Orchestrateur CI/CD, données persistantes, accès au démon Docker de l'hôte |
+| **Docker CLI dans Jenkins** | `docker exec` qui installe `docker-cli` (ou `docker.io`) si `docker` est absent | Permettre au pipeline de lancer des commandes Docker (par exemple pour exécuter Semgrep en conteneur) |
+| **Paramètres noyau** | `vm.max_map_count = 262144`, `fs.file-max = 65536` | Prérequis de SonarQube (moteur de recherche embarqué), persistés par `sysctl` |
+| **SonarQube** | Conteneur `sonarqube:community`, port `9000`, trois volumes (`data`, `logs`, `extensions`) | Serveur d'analyse avec données conservées au redémarrage |
+
+Les deux conteneurs utilisent `restart_policy: unless-stopped` : ils redémarrent automatiquement après un reboot de l'instance, sauf s'ils ont été arrêtés volontairement.
+
+#### Lancer le provisionnement
+
 ```bash
-ansible all -i inventory.ini -m ping        # 1. tester la connexion
+ansible all -i inventory.ini -m ping             # 1. tester la connexion
 ansible-playbook -i inventory.ini playbook.yml   # 2. appliquer le playbook
 ```
 
@@ -252,6 +390,14 @@ ansible-playbook -i inventory.ini playbook.yml   # 2. appliquer le playbook
 *Explication :* le `ping` Ansible renvoie `SUCCESS` / `pong`. Le playbook démarre ensuite la play **« Install Docker, then run Jenkins and SonarQube as containers »** : il installe Docker puis lance Jenkins et SonarQube en conteneurs. Un avertissement indique que la collection `community.docker` ne prend pas officiellement en charge **Ansible 2.16.3** ; il n'a pas empêché l'exécution visible ici, mais il signale un risque de compatibilité à corriger (voir [§ 9](#9-limites-et-recommandations)). La capture s'arrête à la tâche *Gathering Facts* : le récapitulatif final (`PLAY RECAP`) n'y figure pas.
 
 > **Intérêt de l'approche :** l'infrastructure est décrite sous forme de code ; elle peut être reconstruite à l'identique sur une nouvelle instance.
+
+#### Points d'attention sur ce playbook
+
+- **Ports publiés sur toutes les interfaces.** Les mappings `"8080:8080"`, `"50000:50000"` et `"9000:9000"` exposent les services sur toutes les interfaces de la VM. Comme l'accès public passe par le Cloudflare Tunnel, il suffit de ne pas ouvrir ces ports dans le pare-feu GCP, ou de les lier à la boucle locale (`"127.0.0.1:8080:8080"`).
+- **Socket Docker monté dans Jenkins, conteneur en `root`.** C'est pratique (le pipeline peut piloter Docker) mais cela donne à Jenkins un contrôle équivalent à `root` sur l'hôte. Acceptable pour un workshop, à éviter en production.
+- **Tag `lts-jdk21` et `sonarqube:community`.** Ce sont des tags **mobiles** : une réexécution du playbook peut tirer une version plus récente. Pour un environnement reproductible, fixer un tag précis.
+- **Tâche `docker exec`.** Elle passe par `command` : l'idempotence repose sur `command -v docker` et sur `changed_when`, pas sur un module Ansible dédié.
+- **Compatibilité.** L'avertissement `community.docker` / Ansible 2.16.3 vu en figure 4 est à traiter en alignant les versions.
 
 ### 5.3 Exposition de Jenkins et SonarQube via Cloudflare Tunnel
 
@@ -282,17 +428,17 @@ Dans le dépôt GitHub : **Settings → Webhooks → Add webhook**.
 
 ![Configuration du webhook GitHub : Payload URL https://jenkins.khalidlab.tech/github-webhook/, content type application/json](docs/images/07-webhook-github.png)
 
-*Explication :* GitHub envoie un `POST` au format `application/json` vers `https://jenkins.khalidlab.tech/github-webhook/`, point d'entrée du plugin GitHub de Jenkins. C'est ce webhook qui déclenche le pipeline à chaque push (la figure 8 confirme un build *« Started by GitHub push »*). Le champ **Secret** est vide : la signature des requêtes n'est donc pas vérifiée (voir [§ 9.3](#93-recommandations-pour-ce-projet)).
+*Explication :* GitHub envoie un `POST` au format `application/json` vers `https://jenkins.khalidlab.tech/github-webhook/`, point d'entrée du plugin GitHub de Jenkins. C'est ce webhook qui déclenche le pipeline à chaque push (la figure 10 confirme un build *« Started by GitHub push »*). Le champ **Secret** est vide : la signature des requêtes n'est donc pas vérifiée (voir [§ 9.3](#93-recommandations-pour-ce-projet)).
 
 ### 5.5 Configuration de Jenkins et gestion des secrets
 
-D'après la figure 8, le job Jenkins utilise :
+D'après la figure 10, le job Jenkins utilise :
 
 - un outil Node.js déclaré sous le nom **`node22`** (*Global Tool Configuration*) ;
 - une intégration **SonarQube** (analyse puis attente de la Quality Gate) ;
 - un identifiant **`N8N_WEBHOOK_URL`** stocké dans Jenkins et masqué dans les journaux (`****`).
 
-Les secrets ne doivent jamais apparaître dans le code ni dans ce README. Ils sont stockés dans **Manage Jenkins → Credentials** puis injectés dans le pipeline sous forme de variables d'environnement, par exemple `${SONAR_TOKEN}` pour le jeton SonarQube ou les identifiants Cloudflare nécessaires à wrangler. Jenkins masque automatiquement leur valeur dans la console, comme le montre la figure 8.
+Les secrets ne doivent jamais apparaître dans le code ni dans ce README. Ils sont stockés dans **Manage Jenkins → Credentials** puis injectés dans le pipeline sous forme de variables d'environnement, par exemple `${SONAR_TOKEN}` pour le jeton SonarQube ou les identifiants Cloudflare nécessaires à wrangler. Jenkins masque automatiquement leur valeur dans la console, comme le montre la figure 10.
 
 ---
 
@@ -304,7 +450,7 @@ SonarQube analyse le code transmis par le scanner, calcule des indicateurs par *
 
 ### 6.2 Tableau de bord du projet
 
-**Figure 9 — Vue synthétique du projet `learn-actions`**
+**Figure 8 — Vue synthétique du projet `learn-actions`**
 
 ![Carte du projet learn-actions dans SonarQube : Security C 1, Reliability C 8, Maintainability A 1, Coverage 0,0 %, Duplications 0,0 %](docs/images/09-sonarqube-vue-projet.png)
 
@@ -319,11 +465,11 @@ SonarQube analyse le code transmis par le scanner, calcule des indicateurs par *
 | Couverture | — | 0,0 % | Aucun rapport de tests transmis à SonarQube |
 | Duplications | — | 0,0 % | Pas de code dupliqué détecté |
 
-> **Note sur le nombre de problèmes.** La vue *Issues* de la figure 10 affiche **9 issues** pour `app/page.tsx` (filtre sur les statuts *Open* et *Confirmed*), chiffre cohérent avec le résultat rapporté pour le workshop. La carte projet totalise 1 + 8 + 1 = 10 problèmes : un même problème pouvant être rattaché à plusieurs qualités logicielles, ou un problème pouvant se trouver dans un autre fichier, les deux vues ne se comparent pas directement. Les captures ne permettent pas de trancher.
+> **Note sur le nombre de problèmes.** La vue *Issues* de la figure 9 affiche **9 issues** pour `app/page.tsx` (filtre sur les statuts *Open* et *Confirmed*), chiffre cohérent avec le résultat rapporté pour le workshop. La carte projet totalise 1 + 8 + 1 = 10 problèmes : un même problème pouvant être rattaché à plusieurs qualités logicielles, ou un problème pouvant se trouver dans un autre fichier, les deux vues ne se comparent pas directement. Les captures ne permettent pas de trancher.
 
 ### 6.3 Détail d'un problème de sécurité : règle `typescript:S2245`
 
-**Figure 10 — Problème de sécurité sur le générateur pseudo-aléatoire**
+**Figure 9 — Problème de sécurité sur le générateur pseudo-aléatoire**
 
 ![SonarQube : Make sure that using this pseudorandom number generator is safe here, règle typescript:S2245, ligne 33 de app/page.tsx, sécurité Medium](docs/images/10-sonarqube-issue-s2245.png)
 
@@ -333,7 +479,7 @@ SonarQube analyse le code transmis par le scanner, calcule des indicateurs par *
 
 ### 6.4 Problèmes de fiabilité visibles
 
-La liste latérale de la figure 10 montre deux familles de problèmes de fiabilité dans `app/page.tsx` :
+La liste latérale de la figure 9 montre deux familles de problèmes de fiabilité dans `app/page.tsx` :
 
 | Message SonarQube | Signification | Correction recommandée |
 |---|---|---|
@@ -344,11 +490,11 @@ Ces problèmes relèvent de la **fiabilité** et non directement de la sécurit�
 
 ### 6.5 Quality Gate
 
-Dans le build #9 (figure 8), l'étape **Quality Gate** se termine en succès (21 s) et le pipeline poursuit jusqu'au déploiement : la Quality Gate est donc **passée**, malgré les problèmes ouverts. Cela signifie que les conditions de la Quality Gate configurée n'étaient pas enfreintes (la Quality Gate par défaut de SonarQube porte principalement sur le **nouveau code**). La définition exacte des conditions utilisées n'apparaît pas dans les captures.
+Dans le build #9 (figure 10), l'étape **Quality Gate** se termine en succès (21 s) et le pipeline poursuit jusqu'au déploiement : la Quality Gate est donc **passée**, malgré les problèmes ouverts. Cela signifie que les conditions de la Quality Gate configurée n'étaient pas enfreintes (la Quality Gate par défaut de SonarQube porte principalement sur le **nouveau code**). La définition exacte des conditions utilisées n'apparaît pas dans les captures.
 
 ### 6.6 Avertissement : base de données embarquée
 
-La bannière de la figure 10 indique que SonarQube utilise sa **base de données embarquée**, prévue uniquement pour l'évaluation : elle ne permet ni la montée en charge, ni la mise à jour vers une nouvelle version de SonarQube, ni la migration vers un autre moteur. C'est acceptable pour un workshop, mais une base PostgreSQL serait nécessaire pour un usage durable.
+La bannière de la figure 9 indique que SonarQube utilise sa **base de données embarquée**, prévue uniquement pour l'évaluation : elle ne permet ni la montée en charge, ni la mise à jour vers une nouvelle version de SonarQube, ni la migration vers un autre moteur. C'est cohérent avec le playbook, qui lance `sonarqube:community` sans base externe ; c'est acceptable pour un workshop, mais une base PostgreSQL serait nécessaire pour un usage durable.
 
 ---
 
@@ -358,7 +504,7 @@ La bannière de la figure 10 indique que SonarQube utilise sa **base de données
 
 **Rôle :** Semgrep analyse le code en le comparant à des **règles** décrivant des motifs dangereux (par exemple un appel à `eval` sur une entrée utilisateur). Les règles sont exprimées dans une syntaxe proche du code analysé, ce qui les rend faciles à lire et à adapter.
 
-**Exécution dans le pipeline :** l'étape **Semgrep** du build #9 s'est terminée en succès en **15 s** (figure 8).
+**Exécution dans le pipeline :** l'étape **Semgrep** du build #9 s'est terminée en succès en **15 s** (figure 10).
 
 **Résultat rapporté :**
 
@@ -367,7 +513,7 @@ La bannière de la figure 10 indique que SonarQube utilise sa **base de données
 | Règles exécutées | 214 | Rapporté dans la description du workshop |
 | Fichiers analysés | 26 | Rapporté dans la description du workshop |
 | Findings | 0 | Rapporté dans la description du workshop |
-| Étape Jenkins *Semgrep* | Succès, 15 s | **Visible** (figure 8) |
+| Étape Jenkins *Semgrep* | Succès, 15 s | **Visible** (figure 10) |
 
 > Aucune capture de la sortie de Semgrep n'est disponible : le détail des 214 règles, des 26 fichiers et des 0 findings n'a donc pas pu être vérifié visuellement. Le jeu de règles exact utilisé n'est pas visible non plus.
 
@@ -383,7 +529,7 @@ L'option `--error` fait échouer la commande lorsqu'un finding est trouvé, ce q
 
 ### 7.2 Pipeline Jenkins
 
-**Figure 8 — Exécution réussie du build #9 du job `notes`**
+**Figure 10 — Exécution réussie du build #9 du job `notes`**
 
 ![Jenkins, job notes, build #9 : toutes les étapes en vert de Checkout SCM à Post Actions, déclenché par un push GitHub, durée 4 min 9 s](docs/images/08-pipeline-jenkins-build-9.png)
 
@@ -415,7 +561,7 @@ L'ordre des étapes place les **contrôles de sécurité avant le déploiement**
 
 ### 7.3 Détail de l'étape Deploy
 
-La console de l'étape *Deploy* (figure 8) montre la séquence suivante :
+La console de l'étape *Deploy* (figure 10) montre la séquence suivante :
 
 1. sélection de l'outil `node22` et chargement de son environnement ;
 2. contrôle de présence du secret : si `N8N_WEBHOOK_URL` est vide, le pipeline affiche *« N8N_WEBHOOK_URL credential is not configured »* et s'arrête (`exit 1`) ;
@@ -499,6 +645,8 @@ Le fait que SonarQube signale l'usage de `Math.random()` alors que Semgrep ne re
 - Le résultat **Semgrep n'est pas illustré** par une capture de sa sortie.
 - **Aucune correction ni nouvelle analyse** n'est documentée après la détection des problèmes.
 - La compatibilité **`community.docker` / Ansible 2.16.3** est signalée comme non supportée.
+- **Jenkins tourne en `root` avec le socket Docker monté** et les ports `8080`, `50000` et `9000` sont publiés sur toutes les interfaces de la VM (voir [§ 5.2](#52-provisionnement-avec-ansible)).
+- Les **images Docker utilisent des tags mobiles** (`lts-jdk21`, `community`) : l'environnement n'est pas strictement reproductible dans le temps.
 
 ### 9.3 Recommandations pour ce projet
 
@@ -510,17 +658,18 @@ Le fait que SonarQube signale l'usage de `Math.random()` alors que Semgrep ne re
 6. **Ajouter une analyse des dépendances** (`npm audit` ou équivalent) et, à terme, des tests dynamiques (**DAST**).
 7. **Migrer SonarQube vers PostgreSQL** et **installer cloudflared comme service** plutôt qu'en arrière-plan.
 8. **Aligner les versions** d'Ansible et de la collection `community.docker`.
-9. **Masquer les adresses IP publiques** visibles dans les captures avant une publication large du dépôt.
+9. **Lier les ports publiés à `127.0.0.1`** dans le playbook (`"127.0.0.1:8080:8080"`, `"127.0.0.1:9000:9000"`) et **fixer des tags d'image précis** pour Jenkins et SonarQube.
+10. **Masquer les adresses IP publiques** visibles dans les captures avant une publication large du dépôt.
 
 ---
 
 ## 10. Conclusion
 
-Ce workshop a permis de construire une chaîne SAST complète et automatisée. L'infrastructure a été provisionnée **sous forme de code** avec Ansible sur une instance Google Cloud ; Jenkins et SonarQube y tournent en conteneurs Docker et sont exposés de manière sécurisée par un **Cloudflare Tunnel**. Un **webhook GitHub** déclenche le pipeline à chaque push, et Jenkins enchaîne installation, **analyse SonarQube**, **Quality Gate**, **analyse Semgrep** et **déploiement** sur Cloudflare Workers.
+Ce workshop a permis de construire une chaîne SAST complète et automatisée. L'infrastructure a été provisionnée **sous forme de code** avec Ansible (un inventaire et un playbook qui installent Docker puis lancent Jenkins et SonarQube) sur une instance Google Cloud ; Jenkins et SonarQube y tournent en conteneurs Docker et sont exposés de manière sécurisée par un **Cloudflare Tunnel**. Un **webhook GitHub** déclenche le pipeline à chaque push, et Jenkins enchaîne installation, **analyse SonarQube**, **Quality Gate**, **analyse Semgrep** et **déploiement** sur Cloudflare Workers.
 
 Les résultats mesurés montrent la **complémentarité des deux outils** : SonarQube a relevé 9 problèmes dans `app/page.tsx`, dont un problème de sécurité (générateur pseudo-aléatoire non cryptographique) et plusieurs problèmes de fiabilité liés aux promesses, tandis que Semgrep n'a rapporté aucun finding avec ses 214 règles. Le build #9 s'est terminé avec **toutes les étapes au vert** et une Quality Gate passée.
 
-Ce succès doit cependant être lu avec recul : les problèmes détectés n'ont pas encore été corrigés ni retestés, et une Quality Gate passée ou un scan à zéro finding ne garantissent pas l'absence de vulnérabilité. Les prochaines étapes naturelles sont la correction des problèmes identifiés, le durcissement de la Quality Gate et du webhook, puis l'ajout d'analyses complémentaires (dépendances, tests dynamiques) pour couvrir ce que le SAST ne voit pas.
+Ce succès doit cependant être lu avec recul : les problèmes détectés n'ont pas encore été corrigés ni retestés, et une Quality Gate passée ou un scan à zéro finding ne garantissent pas l'absence de vulnérabilité. Les prochaines étapes naturelles sont la correction des problèmes identifiés, le durcissement de la Quality Gate, du webhook et de la configuration Docker, puis l'ajout d'analyses complémentaires (dépendances, tests dynamiques) pour couvrir ce que le SAST ne voit pas.
 
 ---
 
@@ -537,6 +686,9 @@ Ce succès doit cependant être lu avec recul : les problèmes détectés n'ont 
 - GitHub — webhooks : https://docs.github.com/en/webhooks
 - GitHub — validation des livraisons de webhook : https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
 - Ansible — documentation : https://docs.ansible.com/
+- Ansible — collection `community.docker` : https://docs.ansible.com/ansible/latest/collections/community/docker/
+- Docker — installation sur Debian : https://docs.docker.com/engine/install/debian/
+- SonarQube — prérequis système (`vm.max_map_count`) : https://docs.sonarsource.com/sonarqube-server/latest/setup-and-upgrade/pre-installation/linux/
 - Cloudflare Tunnel : https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
 - Cloudflare Workers — wrangler : https://developers.cloudflare.com/workers/wrangler/
 - OWASP — Static Code Analysis : https://owasp.org/www-community/controls/Static_Code_Analysis
